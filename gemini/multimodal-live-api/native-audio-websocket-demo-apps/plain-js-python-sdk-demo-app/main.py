@@ -11,6 +11,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from gemini_live import GeminiLive
 
+#service account
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.expanduser("~/workspace/tmp/key.json")
+
 # Load environment variables
 load_dotenv()
 
@@ -19,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-PROJECT_ID = os.getenv("PROJECT_ID", "your-gcp-project-id")
+PROJECT_ID = os.getenv("PROJECT_ID", "avatr-aispeech-voice")
 LOCATION = os.getenv("LOCATION", "us-central1")
 MODEL = os.getenv("MODEL", "gemini-live-2.5-flash-native-audio")
 
