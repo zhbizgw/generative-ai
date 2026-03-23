@@ -210,6 +210,14 @@ video {
   background-color: var(--danger-color);
 }
 
+.btn.secondary {
+  background-color: #6c757d;
+}
+
+.btn.secondary:hover {
+  background-color: #5a6268;
+}
+
 .chat-input {
   display: flex;
   gap: 0.5rem;

@@ -14,18 +14,48 @@ const sendBtn = document.getElementById("sendBtn");
 const videoPreview = document.getElementById("video-preview");
 const videoPlaceholder = document.getElementById("video-placeholder");
 const connectBtn = document.getElementById("connectBtn");
+const resumeBtn = document.getElementById("resumeBtn");
 const chatLog = document.getElementById("chat-log");
 
 let currentGeminiMessageDiv = null;
 let currentUserMessageDiv = null;
 
+// Session handle management
+const SESSION_HANDLE_KEY = "gemini_session_handle";
+
+const sessionHistoryManager = {
+  saveSessionHandle(handle) {
+    if (handle) {
+      localStorage.setItem(SESSION_HANDLE_KEY, handle);
+      console.log("Session handle saved");
+    }
+  },
+  getSessionHandle() {
+    return localStorage.getItem(SESSION_HANDLE_KEY);
+  },
+  clearSessionHandle() {
+    localStorage.removeItem(SESSION_HANDLE_KEY);
+    console.log("Session handle cleared");
+  },
+  hasSessionHandle() {
+    return !!localStorage.getItem(SESSION_HANDLE_KEY);
+  }
+};
+
 const mediaHandler = new MediaHandler();
+
 const geminiClient = new GeminiClient({
   onOpen: () => {
     statusDiv.textContent = "Connected";
     statusDiv.className = "status connected";
     authSection.classList.add("hidden");
     appSection.classList.remove("hidden");
+
+    // Send resume_session if we have a saved handle
+    const savedHandle = sessionHistoryManager.getSessionHandle();
+    if (savedHandle) {
+      geminiClient.sendText(JSON.stringify({type: "resume_session", handle: savedHandle}));
+    }
 
     // Send hidden instruction
     geminiClient.sendText(
@@ -62,7 +92,10 @@ const geminiClient = new GeminiClient({
 });
 
 function handleJsonMessage(msg) {
-  if (msg.type === "interrupted") {
+  if (msg.type === "session_resumption") {
+    sessionHistoryManager.saveSessionHandle(msg.handle);
+    console.log("Session resumed with handle:", msg.handle);
+  } else if (msg.type === "interrupted") {
     mediaHandler.stopAudioPlayback();
     currentGeminiMessageDiv = null;
     currentUserMessageDiv = null;
@@ -97,8 +130,11 @@ function appendMessage(type, text) {
 
 // Connect Button Handler
 connectBtn.onclick = async () => {
+  // Start new session - clear any saved handle
+  sessionHistoryManager.clearSessionHandle();
   statusDiv.textContent = "Connecting...";
   connectBtn.disabled = true;
+  resumeBtn.classList.add("hidden");
 
   try {
     // Initialize audio context on user gesture
@@ -110,6 +146,28 @@ connectBtn.onclick = async () => {
     statusDiv.textContent = "Connection Failed: " + error.message;
     statusDiv.className = "status error";
     connectBtn.disabled = false;
+  }
+};
+
+// Resume Button Handler
+resumeBtn.onclick = async () => {
+  if (!sessionHistoryManager.hasSessionHandle()) {
+    return;
+  }
+
+  statusDiv.textContent = "Resuming...";
+  resumeBtn.disabled = true;
+  connectBtn.classList.add("hidden");
+
+  try {
+    await mediaHandler.initializeAudio();
+    geminiClient.connect();
+  } catch (error) {
+    console.error("Resume error:", error);
+    statusDiv.textContent = "Resume Failed: " + error.message;
+    statusDiv.className = "status error";
+    resumeBtn.disabled = false;
+    connectBtn.classList.remove("hidden");
   }
 };
 
@@ -228,6 +286,15 @@ function resetUI() {
   screenBtn.textContent = "Share Screen";
   chatLog.innerHTML = "";
   connectBtn.disabled = false;
+  connectBtn.classList.remove("hidden");
+  resumeBtn.disabled = false;
+
+  // Show resume button if we have a saved session handle
+  if (sessionHistoryManager.hasSessionHandle()) {
+    resumeBtn.classList.remove("hidden");
+  } else {
+    resumeBtn.classList.add("hidden");
+  }
 }
 
 function showSessionEnd() {
@@ -235,8 +302,15 @@ function showSessionEnd() {
   sessionEndSection.classList.remove("hidden");
   mediaHandler.stopAudio();
   mediaHandler.stopVideo(videoPreview);
+  // Keep session handle for potential resume
 }
 
 restartBtn.onclick = () => {
+  sessionHistoryManager.clearSessionHandle();
   resetUI();
 };
+
+// Initialize resume button on page load
+if (sessionHistoryManager.hasSessionHandle()) {
+  resumeBtn.classList.remove("hidden");
+}
