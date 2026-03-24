@@ -130,6 +130,11 @@ header {
   color: #d93025;
 }
 
+.status.reconnecting {
+  background-color: #fef7e0;
+  color: #b05a00;
+}
+
 .auth-section {
   display: flex;
   flex-direction: column;

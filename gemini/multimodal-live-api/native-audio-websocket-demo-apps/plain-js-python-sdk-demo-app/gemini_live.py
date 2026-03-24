@@ -106,6 +106,11 @@ class GeminiLive:
                                 if session_resumption_update.resumable and session_resumption_update.new_handle:
                                     await event_queue.put({"type": "session_resumption", "handle": session_resumption_update.new_handle})
 
+                            # Handle goAway notification for session extension
+                            go_away = response.go_away
+                            if go_away:
+                                await event_queue.put({"type": "goAway", "time_left": go_away.time_left})
+
                             if server_content:
                                 if server_content.model_turn:
                                     for part in server_content.model_turn.parts:

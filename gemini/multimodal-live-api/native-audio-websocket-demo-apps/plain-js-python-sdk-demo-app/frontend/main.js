@@ -116,6 +116,24 @@ function handleJsonMessage(msg) {
     } else {
       currentGeminiMessageDiv = appendMessage("gemini", msg.text);
     }
+  } else if (msg.type === "goAway") {
+    console.log("Session expiring in", msg.time_left, "seconds");
+    statusDiv.textContent = `Session expiring in ${msg.time_left}s - reconnecting...`;
+    statusDiv.className = "status reconnecting";
+
+    // Stop audio/video capture before reconnecting
+    mediaHandler.stopAudio();
+    mediaHandler.stopVideo(videoPreview);
+
+    // Delay reconnect to allow session extension before timeout
+    const reconnectDelay = Math.max(0, (msg.time_left - 5)) * 1000;
+    setTimeout(() => {
+      if (geminiClient.isConnected()) {
+        geminiClient.disconnect();
+      }
+      // Reconnect will use the saved session handle
+      geminiClient.connect();
+    }, reconnectDelay);
   }
 }
 
