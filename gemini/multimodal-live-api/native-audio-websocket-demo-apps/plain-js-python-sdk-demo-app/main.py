@@ -3,12 +3,14 @@ import base64
 import json
 import logging
 import os
+from datetime import datetime
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from google.genai import types
 from gemini_live import GeminiLive
 
 # service account
@@ -25,6 +27,39 @@ logger = logging.getLogger(__name__)
 PROJECT_ID = os.getenv("PROJECT_ID", "avatr-aispeech-voice")
 LOCATION = os.getenv("LOCATION", "us-central1")
 MODEL = os.getenv("MODEL", "gemini-live-2.5-flash-native-audio")
+
+# ============================================
+# Simple Function Calling 示例
+# ============================================
+
+def get_current_time() -> str:
+    """获取当前时间"""
+    now = datetime.now()
+    return now.strftime("%Y年%m月%d日 %H:%M:%S")
+
+# Tool mapping: 函数名 -> 实际函数
+tool_mapping = {
+    "get_current_time": get_current_time,
+}
+
+# Tools 配置：定义 Gemini 可以调用的工具 schema
+tools = [
+    types.Tool(
+        function_declarations=[
+            {
+                "name": "get_current_time",
+                "description": "获取当前时间，返回格式化的日期时间字符串",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        ]
+    ),
+    # Google 搜索工具 - 启用基于 Google 搜索结果的回答
+    {'google_search': {}},
+]
 
 # Initialize FastAPI
 app = FastAPI()
@@ -137,7 +172,9 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.info("Creating GeminiLive client")
         gemini_client = GeminiLive(
             project_id=PROJECT_ID, location=LOCATION, model=MODEL, input_sample_rate=16000,
-            session_handle=current_resume_handle
+            session_handle=current_resume_handle,
+            tools=tools,
+            tool_mapping=tool_mapping,
         )
         logger.info("Calling start_session")
         try:
@@ -165,16 +202,29 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Error in Gemini session: {e}")
     finally:
-        # First cancel session_task to trigger its finally block which will
-        # cancel receive_loop. Then wait for receive_task to finish.
+        # Signal connection is closing to stop receive_loop
+        connection_closing.set()
+
+        # Cancel tasks
         session_task.cancel()
         receive_task.cancel()
-        # Wait for both tasks to finish
-        await asyncio.gather(session_task, receive_task, return_exceptions=True)
+
+        # Wait for tasks to finish with timeout
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(session_task, receive_task, return_exceptions=True),
+                timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Task cleanup timed out")
+
+        # Small delay to ensure WebSocket is not being used
+        await asyncio.sleep(0.1)
+
         try:
             await websocket.close()
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"WebSocket close error (may already be closed): {e}")
 
 
 if __name__ == "__main__":

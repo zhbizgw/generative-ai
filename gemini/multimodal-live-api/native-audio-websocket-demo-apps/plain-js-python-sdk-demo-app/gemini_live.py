@@ -2,6 +2,7 @@ import asyncio
 import inspect
 from google import genai
 from google.genai import types
+from websockets.exceptions import ConnectionClosed
 
 class GeminiLive:
     """
@@ -43,7 +44,7 @@ class GeminiLive:
                     )
                 )
             ),
-            system_instruction=types.Content(parts=[types.Part(text="You are a helpful AI assistant. Keep your responses concise. Speak in a friendly Irish accent.")]),
+            system_instruction=types.Content(parts=[types.Part(text="你是一个友好的 AI 助手。当使用 Google 搜索回答实时信息问题时，请在回答中简要说明信息来源，例如'根据 Google 搜索结果...'。保持简洁。")]),
             input_audio_transcription=types.AudioTranscriptionConfig(),
             output_audio_transcription=types.AudioTranscriptionConfig(),
             proactivity=types.ProactivityConfig(proactive_audio=True),
@@ -57,12 +58,18 @@ class GeminiLive:
             logger.info("Connected to Gemini Live session")
 
             async def send_audio():
+                import time
+                last_send_time = time.time()
                 try:
                     while True:
                         chunk = await audio_input_queue.get()
                         await session.send_realtime_input(
                             audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={self.input_sample_rate}")
                         )
+                        now = time.time()
+                        if now - last_send_time > 5:
+                            logger.info(f"音频发送间隔: {now - last_send_time:.1f}秒")
+                        last_send_time = now
                 except asyncio.CancelledError:
                     pass
 
@@ -96,83 +103,100 @@ class GeminiLive:
                         # Check if connection is closing before waiting for response
                         if connection_closing and connection_closing.is_set():
                             break
-                        async for response in session.receive():
-                            server_content = response.server_content
-                            tool_call = response.tool_call
-                            session_resumption_update = response.session_resumption_update
+                        try:
+                            async for response in session.receive():
+                                server_content = response.server_content
+                                tool_call = response.tool_call
+                                session_resumption_update = response.session_resumption_update
+                                # 调试：检查是否有 grounding 相关字段
+                                if hasattr(response, 'grounding_metadata') and response.grounding_metadata:
+                                    logger.info(f"grounding_metadata: {response.grounding_metadata}")
 
-                            # Handle session_resumption_update
-                            if session_resumption_update:
-                                if session_resumption_update.resumable and session_resumption_update.new_handle:
-                                    await event_queue.put({"type": "session_resumption", "handle": session_resumption_update.new_handle})
+                                # Handle session_resumption_update
+                                if session_resumption_update:
+                                    if session_resumption_update.resumable and session_resumption_update.new_handle:
+                                        await event_queue.put({"type": "session_resumption", "handle": session_resumption_update.new_handle})
 
-                            # Handle goAway notification for session extension
-                            go_away = response.go_away
-                            if go_away:
-                                await event_queue.put({"type": "goAway", "time_left": go_away.time_left})
+                                # Handle goAway notification for session extension
+                                go_away = response.go_away
+                                if go_away:
+                                    await event_queue.put({"type": "goAway", "time_left": go_away.time_left})
 
-                            if server_content:
-                                if server_content.model_turn:
-                                    for part in server_content.model_turn.parts:
-                                        if part.inline_data:
-                                            try:
-                                                if inspect.iscoroutinefunction(audio_output_callback):
-                                                    await audio_output_callback(part.inline_data.data)
-                                                else:
-                                                    audio_output_callback(part.inline_data.data)
-                                            except Exception as e:
-                                                logger.error(f"Error in audio_output_callback: {e}")
-                                                should_exit = True
-                                                break
+                                if server_content:
+                                    if server_content.model_turn:
+                                        for part in server_content.model_turn.parts:
+                                            if part.inline_data:
+                                                try:
+                                                    if inspect.iscoroutinefunction(audio_output_callback):
+                                                        await audio_output_callback(part.inline_data.data)
+                                                    else:
+                                                        audio_output_callback(part.inline_data.data)
+                                                except Exception as e:
+                                                    logger.error(f"Error in audio_output_callback: {e}")
+                                                    should_exit = True
+                                                    break
 
-                                if server_content.input_transcription and server_content.input_transcription.text:
-                                    await event_queue.put({"type": "user", "text": server_content.input_transcription.text})
+                                    if server_content.input_transcription and server_content.input_transcription.text:
+                                        await event_queue.put({"type": "user", "text": server_content.input_transcription.text})
 
-                                if server_content.output_transcription and server_content.output_transcription.text:
-                                    await event_queue.put({"type": "gemini", "text": server_content.output_transcription.text})
+                                    if server_content.output_transcription and server_content.output_transcription.text:
+                                        await event_queue.put({"type": "gemini", "text": server_content.output_transcription.text})
 
-                                if server_content.turn_complete:
-                                    await event_queue.put({"type": "turn_complete"})
+                                    if server_content.turn_complete:
+                                        await event_queue.put({"type": "turn_complete"})
 
-                                if server_content.interrupted:
-                                    if audio_interrupt_callback:
-                                        if inspect.iscoroutinefunction(audio_interrupt_callback):
-                                            await audio_interrupt_callback()
-                                        else:
-                                            audio_interrupt_callback()
-                                    await event_queue.put({"type": "interrupted"})
-
-                            if tool_call:
-                                function_responses = []
-                                for fc in tool_call.function_calls:
-                                    func_name = fc.name
-                                    args = fc.args or {}
-
-                                    if func_name in self.tool_mapping:
-                                        try:
-                                            tool_func = self.tool_mapping[func_name]
-                                            if inspect.iscoroutinefunction(tool_func):
-                                                result = await tool_func(**args)
+                                    if server_content.interrupted:
+                                        if audio_interrupt_callback:
+                                            if inspect.iscoroutinefunction(audio_interrupt_callback):
+                                                await audio_interrupt_callback()
                                             else:
-                                                loop = asyncio.get_running_loop()
-                                                result = await loop.run_in_executor(None, lambda: tool_func(**args))
-                                        except Exception as e:
-                                            result = f"Error: {e}"
+                                                audio_interrupt_callback()
+                                        await event_queue.put({"type": "interrupted"})
 
-                                        function_responses.append(types.FunctionResponse(
-                                            name=func_name,
-                                            id=fc.id,
-                                            response={"result": result}
-                                        ))
-                                        await event_queue.put({"type": "tool_call", "name": func_name, "args": args, "result": result})
+                                if tool_call:
+                                    logger.info(f"收到 tool_call: name={tool_call.function_calls[0].name if tool_call.function_calls else 'unknown'}")
+                                    function_responses = []
+                                    for fc in tool_call.function_calls:
+                                        func_name = fc.name
+                                        args = fc.args or {}
 
-                                await session.send_tool_response(function_responses=function_responses)
+                                        if func_name in self.tool_mapping:
+                                            try:
+                                                tool_func = self.tool_mapping[func_name]
+                                                if inspect.iscoroutinefunction(tool_func):
+                                                    result = await tool_func(**args)
+                                                else:
+                                                    loop = asyncio.get_running_loop()
+                                                    result = await loop.run_in_executor(None, lambda: tool_func(**args))
+                                            except Exception as e:
+                                                result = f"Error: {e}"
 
-                            if should_exit:
-                                break
+                                            function_responses.append(types.FunctionResponse(
+                                                name=func_name,
+                                                id=fc.id,
+                                                response={"result": result}
+                                            ))
+                                            await event_queue.put({"type": "tool_call", "name": func_name, "args": args, "result": result})
+                                        else:
+                                            # 内置工具（如 google_search）不在 tool_mapping 中，但也需要显示在前端
+                                            # 这些工具由 Google 自动处理，我们发送空响应
+                                            function_responses.append(types.FunctionResponse(
+                                                name=func_name,
+                                                id=fc.id,
+                                                response={"result": None}
+                                            ))
+                                            await event_queue.put({"type": "tool_call", "name": func_name, "args": args, "result": "[内置工具，由 Google 自动处理]"})
+
+                                    await session.send_tool_response(function_responses=function_responses)
+
+                                if should_exit:
+                                    break
+                        except ConnectionClosed:
+                            logger.warning("Connection closed unexpectedly, exiting receive loop")
+                            break
 
                 except Exception as e:
-                    logger.error(f"receive_loop exception: {e}")
+                    logger.error(f"receive_loop exception: {e}", exc_info=True)
                     await event_queue.put({"type": "error", "error": str(e)})
                 finally:
                     await event_queue.put(None)

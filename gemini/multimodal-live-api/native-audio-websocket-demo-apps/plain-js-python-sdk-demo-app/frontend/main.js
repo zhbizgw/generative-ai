@@ -44,12 +44,59 @@ const sessionHistoryManager = {
 
 const mediaHandler = new MediaHandler();
 
+// 重连配置
+const RECONNECT_CONFIG = {
+  maxRetries: 5,
+  baseDelayMs: 1000,
+  maxDelayMs: 30000,
+};
+
+let reconnectAttempts = 0;
+let reconnectTimeout = null;
+
+function scheduleReconnect() {
+  if (reconnectAttempts >= RECONNECT_CONFIG.maxRetries) {
+    console.log("Max reconnect attempts reached, giving up");
+    statusDiv.textContent = "Connection lost. Please refresh to reconnect.";
+    statusDiv.className = "status error";
+    return;
+  }
+
+  // 指数退避延迟
+  const delay = Math.min(
+    RECONNECT_CONFIG.baseDelayMs * Math.pow(2, reconnectAttempts),
+    RECONNECT_CONFIG.maxDelayMs
+  );
+  reconnectAttempts++;
+
+  console.log(`Scheduling reconnect attempt ${reconnectAttempts} in ${delay}ms`);
+  statusDiv.textContent = `Reconnecting in ${Math.round(delay / 1000)}s... (attempt ${reconnectAttempts}/${RECONNECT_CONFIG.maxRetries})`;
+  statusDiv.className = "status reconnecting";
+
+  reconnectTimeout = setTimeout(() => {
+    // 停止当前的 audio/video capture
+    mediaHandler.stopAudio();
+    mediaHandler.stopVideo(videoPreview);
+
+    // 清除消息界面
+    chatLog.innerHTML = "";
+    currentGeminiMessageDiv = null;
+    currentUserMessageDiv = null;
+
+    // 重新连接
+    geminiClient.connect();
+  }, delay);
+}
+
 const geminiClient = new GeminiClient({
   onOpen: () => {
     statusDiv.textContent = "Connected";
     statusDiv.className = "status connected";
     authSection.classList.add("hidden");
     appSection.classList.remove("hidden");
+
+    // 重置重连计数
+    reconnectAttempts = 0;
 
     // Send resume_session if we have a saved handle
     const savedHandle = sessionHistoryManager.getSessionHandle();
@@ -80,9 +127,13 @@ const geminiClient = new GeminiClient({
   },
   onClose: (e) => {
     console.log("WS Closed:", e);
-    statusDiv.textContent = "Disconnected";
-    statusDiv.className = "status disconnected";
-    showSessionEnd();
+    // 清除重连超时
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
+    // 触发自动重连
+    scheduleReconnect();
   },
   onError: (e) => {
     console.error("WS Error:", e);
@@ -92,9 +143,16 @@ const geminiClient = new GeminiClient({
 });
 
 function handleJsonMessage(msg) {
-  if (msg.type === "session_resumption") {
+  if (msg.type === "error") {
+    // 打印错误日志，重连由 onClose 处理
+    console.error("收到错误消息:", msg.error);
+  } else if (msg.type === "session_resumption") {
     sessionHistoryManager.saveSessionHandle(msg.handle);
     console.log("Session resumed with handle:", msg.handle);
+  } else if (msg.type === "tool_call") {
+    // 显示工具调用信息，方便区分是工具返回的还是 Gemini 直接回复的
+    const toolMsg = `[工具调用] ${msg.name}(${JSON.stringify(msg.args)}) => ${msg.result}`;
+    appendMessage("tool", toolMsg);
   } else if (msg.type === "interrupted") {
     mediaHandler.stopAudioPlayback();
     currentGeminiMessageDiv = null;
